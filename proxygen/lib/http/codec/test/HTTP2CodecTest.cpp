@@ -1377,6 +1377,30 @@ TEST_F(HTTP2CodecTest, BadHeaderPriority) {
   EXPECT_EQ(callbacks_.sessionErrors, 0);
 }
 
+TEST_F(HTTP2CodecTest, DuplicateBadHeaderPriority) {
+  // Sent an initial header with a circular dependency
+  HTTPMessage req = getGetRequest();
+  req.setHTTP2Priority(HTTPMessage::HTTPPriority(0, false, 7));
+  upstreamCodec_.generateHeader(output_, 1, req, true /* eom */);
+
+  // Hack ingress with circular dependency.
+  EXPECT_TRUE(parse([&](IOBuf* ingress) {
+    folly::io::RWPrivateCursor c(ingress);
+    c.skip(http2::kFrameHeaderSize + http2::kConnectionPreface.length());
+    c.writeBE<uint32_t>(1);
+  }));
+
+  EXPECT_EQ(callbacks_.streamErrors, 1);
+  EXPECT_EQ(callbacks_.sessionErrors, 0);
+
+  // On the same stream, send another request.
+  HTTPMessage nextRequest = getGetRequest();
+  upstreamCodec_.generateHeader(output_, 1, nextRequest, true /* eom */);
+  parse();
+  EXPECT_EQ(callbacks_.streamErrors, 2);
+  EXPECT_EQ(callbacks_.sessionErrors, 0);
+}
+
 TEST_F(HTTP2CodecTest, BadPriority) {
   auto pri = HTTPMessage::HTTPPriority(0, true, 1);
   upstreamCodec_.generatePriority(output_, 1, pri);
@@ -2120,4 +2144,29 @@ TEST_F(HTTP2CodecTest, TrailersReplyMissingContinuation) {
 #ifndef NDEBUG
   EXPECT_EQ(upstreamCodec_.getReceivedFrameCount(), 4);
 #endif
+}
+
+TEST_F(HTTP2CodecTest, TrailersNotLatest) {
+  HTTPMessage req = getGetRequest("/guacamole");
+  req.getHeaders().add(HTTP_HEADER_USER_AGENT, "coolio");
+  upstreamCodec_.generateHeader(output_, 1, req);
+  upstreamCodec_.generateHeader(output_, 3, req);
+
+  HTTPHeaders trailers;
+  trailers.add("x-trailer-1", "pico-de-gallo");
+  upstreamCodec_.generateTrailers(output_, 1, trailers);
+  upstreamCodec_.generateHeader(output_, 3, req);
+
+  parse();
+
+  EXPECT_EQ(callbacks_.messageBegin, 2);
+  EXPECT_EQ(callbacks_.headersComplete, 2);
+  EXPECT_EQ(callbacks_.bodyCalls, 0);
+  EXPECT_EQ(callbacks_.trailers, 1);
+  EXPECT_NE(nullptr, callbacks_.msg->getTrailers());
+  EXPECT_EQ("pico-de-gallo",
+            callbacks_.msg->getTrailers()->getSingleOrEmpty("x-trailer-1"));
+  EXPECT_EQ(callbacks_.messageComplete, 1);
+  EXPECT_EQ(callbacks_.streamErrors, 1);
+  EXPECT_EQ(callbacks_.sessionErrors, 0);
 }

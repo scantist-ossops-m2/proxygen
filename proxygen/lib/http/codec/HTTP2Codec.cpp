@@ -514,21 +514,23 @@ folly::Optional<ErrorCode> HTTP2Codec::parseHeadersDecodeFrames(
     isReq = transportDirection_ == TransportDirection::DOWNSTREAM;
   }
 
+  // Validate circular dependencies.
+  if (priority && (curHeader_.stream == priority->streamDependency)) {
+    streamError(
+        folly::to<string>("Circular dependency for txn=", curHeader_.stream),
+        ErrorCode::PROTOCOL_ERROR,
+        curHeader_.type == http2::FrameType::HEADERS);
+    return ErrorCode::NO_ERROR;
+  }
+
   decodeInfo_.init(isReq, parsingDownstreamTrailers_);
   if (priority) {
-    if (curHeader_.stream == priority->streamDependency) {
-      streamError(folly::to<string>("Circular dependency for txn=",
-                                    curHeader_.stream),
-                  ErrorCode::PROTOCOL_ERROR,
-                  curHeader_.type == http2::FrameType::HEADERS);
-      return ErrorCode::NO_ERROR;
-    }
-
     decodeInfo_.msg->setHTTP2Priority(
         std::make_tuple(priority->streamDependency,
                         priority->exclusive,
                         priority->weight));
   }
+
   headerCodec_.decodeStreaming(
       headerCursor, curHeaderBlock_.chainLength(), this);
   msg = std::move(decodeInfo_.msg);
@@ -985,7 +987,7 @@ ErrorCode HTTP2Codec::checkNewStream(uint32_t streamId, bool trailersAllowed) {
     VLOG(4) << "Parsing downstream trailers streamId=" << streamId;
   }
 
-  if (sessionClosing_ != ClosingState::CLOSED) {
+  if (sessionClosing_ != ClosingState::CLOSED && streamId > lastStreamID_) {
     lastStreamID_ = streamId;
   }
 
@@ -1311,6 +1313,7 @@ size_t HTTP2Codec::generateChunkTerminator(folly::IOBufQueue& /*writeBuf*/,
 size_t HTTP2Codec::generateTrailers(folly::IOBufQueue& writeBuf,
                                     StreamID stream,
                                     const HTTPHeaders& trailers) {
+  VLOG(4) << "generating TRAILERS for stream=" << stream;
   std::vector<compress::Header> allHeaders;
   CodecUtil::appendHeaders(trailers, allHeaders, HTTP_HEADER_NONE);
 
